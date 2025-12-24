@@ -234,9 +234,9 @@ def main():
     print(f"[INFO] 特征数量: {len(feature_cols)}")
     
     # 4. 标签分布统计
-    labels = ['背景', '准备', '核心', '恢复']
+    labels = ['背景', '准备', '核心', '恢复', '过渡']
     print(f"\n[INFO] 标签分布:")
-    for label_idx in range(4):
+    for label_idx in range(len(labels)):
         count = np.sum(y == label_idx)
         pct = count / len(y) * 100
         print(f"  {labels[label_idx]} ({label_idx}): {count:6d} ({pct:5.2f}%)")
@@ -248,9 +248,9 @@ def main():
     else:
         try:
             weights = [float(w) for w in args.class_weights.split(',')]
-            if len(weights) != 4:
-                raise ValueError("权重数量必须为4")
-            class_weight = {i: weights[i] for i in range(4)}
+            if len(weights) != 5:
+                raise ValueError("权重数量必须为5")
+            class_weight = {i: weights[i] for i in range(5)}
             print(f"\n[INFO] 使用手动权重: {class_weight}")
         except Exception as e:
             print(f"[ERROR] 权重格式错误: {e}")

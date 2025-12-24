@@ -251,9 +251,15 @@ def visualize_pca_3d(features_df: pd.DataFrame, out_dir: str) -> Optional[Tuple]
           f"PC3={pca.explained_variance_ratio_[2]*100:.1f}%, "
           f"总计={sum(pca.explained_variance_ratio_)*100:.1f}%")
     
-    # 标签配置
-    label_names = {0: '背景', 1: '准备', 2: '核心', 3: '恢复'}
-    colors = {0: '#BDBDBD', 1: '#FDD835', 2: '#E53935', 3: '#FB8C00'}
+    # 标签配置 (与 generate_labels.py 保持一致)
+    label_names = {0: '背景', 1: '准备', 2: '核心', 3: '恢复', 4: '过渡'}
+    colors = {
+        0: '#BBDEFB',  # 浅蓝 - 背景
+        1: '#FFF59D',  # 黄色 - 准备
+        2: '#FF5252',  # 红色 - 核心
+        3: '#90CAF9',  # 蓝色 - 恢复
+        4: '#CE93D8'   # 紫色 - 过渡
+    }
     
     # 创建多角度视图
     fig = plt.figure(figsize=(20, 15))
@@ -313,7 +319,7 @@ def visualize_pca_interactive(X_pca: np.ndarray, y: np.ndarray, pca: PCA, out_di
         print("  生成交互式3D PCA可视化...")
         
         # 准备数据
-        label_names = {0: '背景', 1: '准备', 2: '核心', 3: '恢复'}
+        label_names = {0: '背景', 1: '准备', 2: '核心', 3: '恢复', 4: '过渡'}
         df_plot = pd.DataFrame({
             'PC1': X_pca[:, 0],
             'PC2': X_pca[:, 1],
@@ -328,10 +334,11 @@ def visualize_pca_interactive(X_pca: np.ndarray, y: np.ndarray, pca: PCA, out_di
             x='PC1', y='PC2', z='PC3',
             color='label_name',
             color_discrete_map={
-                '背景': '#BDBDBD',
-                '准备': '#FDD835',
-                '核心': '#E53935',
-                '恢复': '#FB8C00'
+                '背景': '#BBDEFB',
+                '准备': '#FFF59D',
+                '核心': '#FF5252',
+                '恢复': '#90CAF9',
+                '过渡': '#CE93D8'
             },
             opacity=0.6,
             title=f'PCA 3D交互式可视化 (解释方差: {sum(pca.explained_variance_ratio_)*100:.1f}%)',
@@ -370,8 +377,8 @@ def visualize_pca_components(X_pca: np.ndarray, y: np.ndarray, pca: PCA, out_dir
     """生成PCA主成分两两对比图"""
     print("  生成PCA主成分对比图...")
     
-    label_names = {0: '背景', 1: '准备', 2: '核心', 3: '恢复'}
-    colors = {0: '#BDBDBD', 1: '#FDD835', 2: '#E53935', 3: '#FB8C00'}
+    label_names = {0: '背景', 1: '准备', 2: '核心', 3: '恢复', 4: '过渡'}
+    colors = {0: '#BBDEFB', 1: '#FFF59D', 2: '#FF5252', 3: '#90CAF9', 4: '#CE93D8'}
     
     fig, axes = plt.subplots(1, 3, figsize=(18, 5))
     
@@ -426,8 +433,8 @@ def visualize_feature_boxplots(features_df: pd.DataFrame, out_dir: str):
     fig, axes = plt.subplots(n_rows, n_cols, figsize=(20, 5 * n_rows))
     axes = axes.flatten() if n_rows > 1 else [axes] if n_cols == 1 else axes
     
-    label_names = {0: '背景', 1: '准备', 2: '核心', 3: '恢复'}
-    colors = ['#BDBDBD', '#FDD835', '#E53935', '#FB8C00']
+    label_names = {0: '背景', 1: '准备', 2: '核心', 3: '恢复', 4: '过渡'}
+    colors = ['#BBDEFB', '#FFF59D', '#FF5252', '#90CAF9', '#CE93D8']
     
     for idx, feature in enumerate(key_features[:n_features]):
         ax = axes[idx]
@@ -509,9 +516,10 @@ def main():
     print(f"特征窗口数: {len(features_df)}")
     print(f"\n标签分布:")
     label_counts = features_df['label'].value_counts().sort_index()
+    label_map = {0: '背景', 1: '准备', 2: '核心', 3: '恢复', 4: '过渡'}
     for label, count in label_counts.items():
         pct = count / len(features_df) * 100
-        label_name = ['背景', '准备', '核心', '恢复'][label]
+        label_name = label_map.get(label, str(label))
         print(f"  {label_name} ({label}): {count:6d} ({pct:5.2f}%)")
     
     # 生成可视化

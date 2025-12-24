@@ -8,7 +8,7 @@ import argparse
 import os
 import numpy as np
 import pandas as pd
-import lightgbm as lgb
+import pickle  # Changed from lightgbm
 from scipy import stats as scipy_stats
 from scipy.fft import fft
 
@@ -102,36 +102,77 @@ def detect_events_with_ml(csv_path: str, model_path: str,
     acc_data = df[acc_cols].values
     
     print(f"[INFO] 加载模型: {model_path}")
-    model = lgb.Booster(model_file=model_path)
+    with open(model_path, 'rb') as f:
+        model = pickle.load(f)
+    print(f"[INFO] 模型类型: {type(model).__name__}")
     
     print(f"[INFO] 开始滑动窗口检测...")
     print(f"  窗口大小: {window_size} 样本 (400ms)")
     print(f"  步长: {stride} 样本 ({stride*10}ms)")
     print(f"  核心期阈值: {core_prob_threshold}")
     
-    # 滑动窗口提取特征并预测
-    core_probs = []
+    # 滑动窗口提取特征
+    features_list = []
     window_times = []
     
     total_windows = (len(acc_data) - window_size) // stride + 1
     
+    # 预加载特征名以便构建 DataFrame
+    dummy_feat = extract_window_features(acc_data[0:window_size])
+    feature_cols = list(dummy_feat.keys())
+
     for i in range(0, len(acc_data) - window_size + 1, stride):
         window = acc_data[i:i+window_size]
         center_time = time_data[i + window_size // 2]
         
-        # 提取特征
+        # 提取基础特征
         features = extract_window_features(window)
-        feature_df = pd.DataFrame([features])
-        
-        # 预测 (返回每个类别的概率)
-        pred_probs = model.predict(feature_df)[0]  # [背景, 准备, 核心, 恢复]
-        core_prob = pred_probs[2]  # 核心期概率
-        
-        core_probs.append(core_prob)
+        features_list.append(features)
         window_times.append(center_time)
         
-        if len(core_probs) % 5000 == 0:
-            print(f"  已处理 {len(core_probs)}/{total_windows} 个窗口...")
+        if len(features_list) % 5000 == 0:
+            print(f"  已提取 {len(features_list)}/{total_windows} 个窗口特征...")
+            
+    # 转换为 DataFrame以批量处理
+    feature_df = pd.DataFrame(features_list)
+    
+    # ========== 添加时间序列特征 (与 Script 5 保持一致) ==========
+    print("\n[INFO] 计算时间序列特征...")
+    
+    # 关键特征列表
+    key_cols = ['y_mean', 'y_std', 'y_rms', 'y_ptp', 
+                'mag_mean', 'mag_max', 'mag_std',
+                'gradient_max', 'dynamic_range']
+    
+    # 过滤存在的列
+    key_cols = [col for col in key_cols if col in feature_df.columns]
+    
+    # 1. 差分特征
+    for col in key_cols:
+        feature_df[f'{col}_diff'] = feature_df[col].diff().fillna(0)
+    
+    # 2. 滚动统计
+    for col in key_cols:
+        feature_df[f'{col}_roll3_mean'] = feature_df[col].rolling(window=3, min_periods=1).mean()
+        feature_df[f'{col}_roll3_std'] = feature_df[col].rolling(window=3, min_periods=1).std().fillna(0)
+    
+    # 3. 加速度特征
+    for col in ['y_rms', 'mag_max']:
+        if col in feature_df.columns:
+            feature_df[f'{col}_accel'] = feature_df[col].diff().diff().fillna(0)
+    
+    # 4. 动量特征
+    for col in ['y_rms', 'mag_mean']:
+        if col in feature_df.columns:
+            feature_df[f'{col}_momentum'] = feature_df[col].diff().rolling(window=5, min_periods=1).sum().fillna(0)
+            
+    print(f"[INFO] 最终特征数量: {len(feature_df.columns)}")
+    
+    # 批量预测
+    print(f"[INFO] 开始批量预测...")
+    # 5类: [背景, 准备, 核心, 恢复, 过渡]
+    pred_probs = model.predict_proba(feature_df)
+    core_probs = pred_probs[:, 2]  # 核心期概率 (Index 2)
     
     print(f"[INFO] 预测完成，共 {len(core_probs)} 个窗口")
     

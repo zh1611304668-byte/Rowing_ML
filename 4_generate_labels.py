@@ -7,7 +7,8 @@
 - 0: 背景/静止
 - 1: 划桨准备期 (事件前200ms)
 - 2: 划桨核心期 (事件前后±100ms)
-- 3: 划桨恢复期 (事件后300ms)
+- 3: 划桨恢复期 (核心后自适应)
+- 4: 划桨过渡期 (恢复后固定400ms)
 """
 
 import argparse
@@ -55,15 +56,18 @@ def generate_labels(
     recover_drop_ratio: float = 1.3,
     recover_abs_threshold: float = 0.025,
     recover_min_duration_ms: float = 300.0,
-    background_percentile: float = 20.0
+    background_percentile: float = 20.0,
+    transition_std_ratio: float = 0.4,  # 新增：过渡期标准差下降比例
+    transition_min_duration_ms: float = 150.0  # 新增：过渡期最小持续时间
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
     生成多类别标签
-    
-    新逻辑：恢复期从核心期结束开始，到加速度从负值回升至背景平均值时结束
+    新逻辑：将划桨后阶段拆分为：
+    - 恢复期(3)：核心期结束后，加速度由正值很大变为上下波动的高振幅阶段（自适应检测）
+    - 过渡期(4)：振荡平稳后，持续固定的过渡时间（固定400ms）
     
     Returns:
-        labels: 0=背景, 1=准备, 2=核心, 3=恢复
+        labels: 0=背景, 1=准备, 2=核心, 3=恢复, 4=过渡
         stroke_ids: 每个样本所属的划桨编号 (-1表示背景)
     """
     n = len(time_s)
@@ -76,6 +80,7 @@ def generate_labels(
     min_still_samples = max(1, int(round(recover_min_still_ms / 1000.0 * fs)))
     left_window_samples = max(1, int(round(recover_left_window_ms / 1000.0 * fs)))
     min_duration_samples = max(1, int(round(recover_min_duration_ms / 1000.0 * fs)))
+    transition_min_samples = max(1, int(round(transition_min_duration_ms / 1000.0 * fs)))
 
     # 平滑原始加速度信号（全局平滑，用于所有事件）
     acc_smooth = None
@@ -136,10 +141,12 @@ def generate_labels(
         # 动态右侧阈值：随本次振幅变化，限制在 [abs_threshold, 0.05]
         dyn_abs_threshold = min(max(recover_abs_threshold, local_peak_abs * 0.06), 0.05)
 
-        recover_end_idx = recover_end_idx_default
+        transition_end_idx = recover_end_idx_default
+        recover_end_idx = core_end_idx  # 初始化恢复期结束位置
         
-        # 简化的恢复期自适应逻辑：
-        # 从核心期结束开始，寻找“右侧绝对值均值”的最小窗口，且满足左大右小。
+        # 两阶段检测逻辑：
+        # Phase 1: Recovery (Label 3) - Adaptive
+        # Phase 2: Transition (Label 4) - Fixed 400ms
         if acc_smooth is not None:
             acc_abs = np.abs(acc_smooth)
             if next_event is not None:
@@ -149,32 +156,58 @@ def generate_labels(
             search_stop = min(search_stop, len(time_s) - 1)
             search_stop = max(search_stop, core_end_idx + min_still_samples)
 
-            best_right_mean = float("inf")
+            # === 第一阶段：寻找恢复期结束点（自适应检测 - 蓝色） ===
+            # Recover (Label 3): 从核心期结束开始，到高振幅振荡结束
+            # 使用绝对阈值检测稳定性
+            
+            initial_window_end = min(core_end_idx + min_duration_samples, len(acc_smooth))
+            initial_std = float(np.std(acc_smooth[core_end_idx:initial_window_end])) if initial_window_end > core_end_idx else 0.0
+            
+            recover_found = False
+            recover_end_idx = core_end_idx + min_duration_samples
+            
             for idx in range(core_end_idx + min_duration_samples, search_stop - min_still_samples + 1):
-                right_slice = acc_abs[idx:idx + min_still_samples]
-                right_mean = float(np.mean(right_slice))
-
-                left_start = max(0, idx - left_window_samples)
-                left_slice = acc_abs[left_start:idx] if idx > left_start else right_slice
-                left_mean = float(np.mean(left_slice))
-
-                # 仅在右侧达到目前为止的最小均值时考虑截断，避免过早切断
-                best_right_mean = min(best_right_mean, right_mean)
-
-                # 动态阈值基于本次局部峰值，避免高振幅时阈值过紧
-                if (left_mean > right_mean * recover_drop_ratio) and (right_mean < dyn_abs_threshold):
-                    recover_end_idx = idx + min_still_samples
+                window_slice = acc_smooth[idx:idx + min_still_samples]
+                window_std = float(np.std(window_slice))
+                window_mean = float(np.mean(np.abs(window_slice)))
+                
+                # 恢复期结束条件：
+                # 1. 振荡减弱 (std < 0.08g)
+                # 2. 偏移回归 (mean < 0.15g) - 收紧阈值
+                # 3. [新增] 前瞻检查：确保后续短期内没有再次升高的波峰（防止虚假结束）
+                if window_std < 0.08 and window_mean < 0.15:
+                    # 前瞻 300ms (约37个点)
+                    look_ahead_samples = int(0.3 * fs) 
+                    look_ahead_end = min(idx + look_ahead_samples, search_stop)
+                    if look_ahead_end > idx:
+                        future_peak = np.max(np.abs(acc_smooth[idx:look_ahead_end]))
+                        # 如果未来有超过 0.25g 的峰值，说明还在振荡中，不结束
+                        if future_peak > 0.25:
+                            continue
+                    
+                    recover_end_idx = idx
+                    recover_found = True
                     break
-
-            recover_end_idx = min(recover_end_idx, search_stop)
+            
+            if not recover_found:
+                recover_end_idx = min(core_end_idx + min_duration_samples, search_stop)
+            
+            # === 第二阶段：过渡期结束点（固定 500ms - 紫色） ===
+            # Transition (Label 4): 从恢复期结束开始，持续固定 500ms
+            transition_fixed_duration_ms = 500.0
+            transition_samples = int(round(transition_fixed_duration_ms / 1000.0 * fs))
+            
+            transition_end_idx = recover_end_idx + transition_samples
+            transition_end_idx = min(transition_end_idx, search_stop)
 
         # 标注各阶段
         labels[prepare_start_idx:core_start_idx] = 1  # 准备期
         labels[core_start_idx:core_end_idx] = 2       # 核心期
-        labels[core_end_idx:recover_end_idx] = 3      # 恢复期
+        labels[core_end_idx:recover_end_idx] = 3      # 恢复期（自适应 - 蓝色）
+        labels[recover_end_idx:transition_end_idx] = 4 # 过渡期（固定500ms - 紫色）
 
-        # 记录所属划桨编号
-        stroke_ids[prepare_start_idx:recover_end_idx] = stroke_id
+        # 记录所属划桨编号（包括过渡期）
+        stroke_ids[prepare_start_idx:transition_end_idx] = stroke_id
     
     return labels, stroke_ids
 
@@ -189,9 +222,10 @@ def visualize_labels(df: pd.DataFrame, acc_cols: Tuple[str, str, str],
         0: '#BBDEFB',  # 浅蓝 - 背景
         1: '#FFF59D',  # 黄色 - 准备
         2: '#FF5252',  # 红色 - 核心
-        3: '#FFB74D'   # 橙色 - 恢复
+        3: '#90CAF9',  # 蓝色 - 恢复
+        4: '#CE93D8'   # 紫色 - 过渡
     }
-    label_names = {0: '背景', 1: '准备', 2: '核心', 3: '恢复'}
+    label_names = {0: '背景', 1: '准备', 2: '核心', 3: '恢复', 4: '过渡'}
     
     # 随机采样几段数据可视化
     stroke_events = df[df['label'] == 2]['time'].values
@@ -224,7 +258,7 @@ def visualize_labels(df: pd.DataFrame, acc_cols: Tuple[str, str, str],
         # ===================
         
         # 先绘制标签背景区域
-        for label_value in [1, 2, 3]:
+        for label_value in [1, 2, 3, 4]:
             label_mask = df_sample['label'].values == label_value
             if not np.any(label_mask):
                 continue
@@ -264,7 +298,7 @@ def visualize_labels(df: pd.DataFrame, acc_cols: Tuple[str, str, str],
         axes[0].grid(True, alpha=0.3, linestyle=':', linewidth=0.8)
         axes[0].set_title(
             f'样本 {i}/{num_samples}: 划桨事件 @ {event_time:.2f}s  ' + 
-            f'[黄=准备, 红=核心, 橙=恢复]', 
+            f'[黄=准备, 红=核心, 蓝=恢复, 紫=过渡]', 
             fontsize=15, fontweight='bold', pad=15
         )
         
@@ -279,7 +313,7 @@ def visualize_labels(df: pd.DataFrame, acc_cols: Tuple[str, str, str],
                     linewidth=2.5, label='加速度幅值', zorder=2)
         
         # 为不同标签区域填充颜色
-        for label_value in [0, 1, 2, 3]:
+        for label_value in [0, 1, 2, 3, 4]:
             label_mask = df_sample['label'] == label_value
             if np.any(label_mask):
                 axes[1].fill_between(
@@ -325,12 +359,14 @@ def generate_statistics(df: pd.DataFrame, out_dir: str):
             '准备 (1)': int(label_counts.get(1, 0)),
             '核心 (2)': int(label_counts.get(2, 0)),
             '恢复 (3)': int(label_counts.get(3, 0)),
+            '过渡 (4)': int(label_counts.get(4, 0)),
         },
         'label_percentage': {
             '背景 (0)': f"{label_counts.get(0, 0) / total * 100:.2f}%",
             '准备 (1)': f"{label_counts.get(1, 0) / total * 100:.2f}%",
             '核心 (2)': f"{label_counts.get(2, 0) / total * 100:.2f}%",
             '恢复 (3)': f"{label_counts.get(3, 0) / total * 100:.2f}%",
+            '过渡 (4)': f"{label_counts.get(4, 0) / total * 100:.2f}%",
         },
         'unique_strokes': int(df['stroke_id'].max() + 1) if len(df) > 0 else 0,
     }
@@ -343,9 +379,9 @@ def generate_statistics(df: pd.DataFrame, out_dir: str):
     # 绘制标签分布图
     fig, axes = plt.subplots(1, 2, figsize=(14, 5))
     
-    labels_list = ['背景', '准备', '核心', '恢复']
-    sizes = [label_counts.get(i, 0) for i in range(4)]
-    colors = ['lightgray', 'yellow', 'red', 'orange']
+    labels_list = ['背景', '准备', '核心', '恢复', '过渡']
+    sizes = [label_counts.get(i, 0) for i in range(5)]
+    colors = ['lightgray', 'yellow', 'red', 'skyblue', 'purple']
     
     axes[0].pie(sizes, labels=labels_list, colors=colors, autopct='%1.1f%%', startangle=90)
     axes[0].set_title('标签分布 (百分比)', fontsize=14)

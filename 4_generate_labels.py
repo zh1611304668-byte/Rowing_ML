@@ -47,14 +47,15 @@ def generate_labels(
     acc_raw: Optional[np.ndarray],  # 改为原始加速度（带正负）
     prepare_window_ms: float = 200.0,
     core_window_ms: float = 100.0,
-    recover_window_ms: float = 800.0,
-    recover_min_still_ms: float = 200.0,
+    recover_window_ms: float = 600.0,  # ✅ 再次缩短：500→400
+    recover_min_still_ms: float = 150.0,
     recover_smooth_sec: float = 0.10,
-    recover_hard_cap_ms: float = 1600.0,
+    recover_hard_cap_ms: float = 1000.0,  # ✅ 再次缩短：800→700
     recover_left_window_ms: float = 250.0,
-    recover_drop_ratio: float = 1.5,
-    recover_abs_threshold: float = 0.018,
-    recover_min_duration_ms: float = 350.0
+    recover_drop_ratio: float = 1.3,
+    recover_abs_threshold: float = 0.025,
+    recover_min_duration_ms: float = 300.0,
+    background_percentile: float = 20.0
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
     生成多类别标签
@@ -85,6 +86,16 @@ def generate_labels(
             acc_smooth = np.convolve(acc_raw, kernel, mode="same")
         else:
             acc_smooth = acc_raw.copy()
+    
+    # ========== 新增：计算背景基线 ==========
+    background_threshold = recover_abs_threshold  # 默认值
+    if acc_smooth is not None:
+        acc_abs = np.abs(acc_smooth)
+        # 使用整体信号的低分位数作为背景参考
+        background_threshold = float(np.percentile(acc_abs, background_percentile))
+        # 限制在合理范围内 [0.015, 0.04]
+        background_threshold = max(0.015, min(background_threshold, 0.04))
+        print(f"[INFO] 背景基线阈值 (P{background_percentile:.0f}): {background_threshold:.4f}g")
 
     events_sorted = np.sort(events)
     total_events = len(events_sorted)

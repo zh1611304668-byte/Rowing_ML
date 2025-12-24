@@ -280,6 +280,7 @@ def main():
     # 手动执行交叉验证
     print("[INFO] 执行交叉验证预测...")
     y_pred_cv = np.zeros(len(y), dtype=int)
+    y_proba_cv = np.zeros((len(y), len(labels)), dtype=float)  # ✅ 新增：保存CV概率
     
     for fold_idx, (train_idx, test_idx) in enumerate(tscv.split(X), 1):
         print(f"  Fold {fold_idx}/{args.cv_splits} - Train: {len(train_idx)}, Test: {len(test_idx)}")
@@ -297,6 +298,7 @@ def main():
         
         # 预测测试集
         y_pred_cv[test_idx] = rf_fold.predict(X[test_idx])
+        y_proba_cv[test_idx] = rf_fold.predict_proba(X[test_idx])  # ✅ 新增：保存概率
     
     # 8. 评估指标
     print("\n" + "="*60)
@@ -332,16 +334,14 @@ def main():
                                       random_state=42, 
                                       n_jobs=-1)
     
-    # 11. 输出概率分布（为 HMM 准备）
-    print(f"\n[INFO] 生成每帧概率分布...")
-    y_proba = rf.predict_proba(X)
-    y_pred_final = rf.predict(X)
+    # 11. 输出概率分布（为 HMM 准备）- 使用 CV 概率
+    print(f"\n[INFO] 生成每帧概率分布（基于交叉验证）...")
     
-    # 创建概率DataFrame
-    proba_df = pd.DataFrame(y_proba, columns=[f'prob_{label}' for label in labels])
+    # 创建概率DataFrame（使用CV概率，而非训练集概率）
+    proba_df = pd.DataFrame(y_proba_cv, columns=[f'prob_{label}' for label in labels])
     proba_df['true_label'] = y
-    proba_df['pred_label'] = y_pred_final
-    proba_df['is_correct'] = (y == y_pred_final).astype(int)
+    proba_df['pred_label'] = y_pred_cv  # 使用CV预测
+    proba_df['is_correct'] = (y == y_pred_cv).astype(int)
     
     if 'time' in df.columns:
         proba_df.insert(0, 'time', df['time'].values)

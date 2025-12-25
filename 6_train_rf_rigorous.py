@@ -25,6 +25,14 @@ from sklearn.model_selection import TimeSeriesSplit, cross_val_predict
 from sklearn.metrics import classification_report, confusion_matrix
 from sklearn.inspection import permutation_importance
 
+try:
+    from imblearn.over_sampling import SMOTE
+    SMOTE_AVAILABLE = True
+except ImportError:
+    SMOTE_AVAILABLE = False
+    print("[WARNING] imblearn未安装，SMOTE功能不可用")
+    print("          运行: pip install imbalanced-learn")
+
 # 配置matplotlib支持中文
 plt.rcParams['font.sans-serif'] = ['SimHei', 'Microsoft YaHei', 'Arial Unicode MS']
 plt.rcParams['axes.unicode_minus'] = False
@@ -200,6 +208,10 @@ def main():
                        help='输出目录')
     parser.add_argument('--vis_dir', type=str, default='datasets/visualizations',
                        help='可视化输出目录')
+    parser.add_argument('--use_smote', action='store_true',
+                       help='使用SMOTE进行特征级增强（推荐用于类别不平衡）')
+    parser.add_argument('--smote_k', type=int, default=5,
+                       help='SMOTE的k近邻参数')
     
     args = parser.parse_args()
     
@@ -233,16 +245,44 @@ def main():
     print(f"\n[INFO] 特征维度: {X.shape}")
     print(f"[INFO] 特征数量: {len(feature_cols)}")
     
-    # 4. 标签分布统计
+    # 4. 应用SMOTE（如果启用）
+    if args.use_smote:
+        if not SMOTE_AVAILABLE:
+            print("\n[ERROR] SMOTE未安装，无法使用！")
+            print("        请运行: pip install imbalanced-learn")
+            return
+        
+        print(f"\n[INFO] 应用SMOTE增强（k_neighbors={args.smote_k}）...")
+        print(f"  原始样本数: {len(X)}")
+        
+        # 计算每个类别的最小样本数
+        unique, counts = np.unique(y, return_counts=True)
+        min_samples = counts.min()
+        
+        # SMOTE要求k < min_samples
+        actual_k = min(args.smote_k, min_samples - 1)
+        if actual_k != args.smote_k:
+            print(f"  [WARNING] k调整为 {actual_k}（最小类别样本数限制）")
+        
+        smote = SMOTE(random_state=42, k_neighbors=actual_k)
+        X, y = smote.fit_resample(X, y)
+        
+        print(f"  增强后样本数: {len(X)} (+{len(X) - len(df)} 样本)")
+    
+    # 5. 标签分布统计
     labels = ['背景', '准备', '核心', '恢复', '过渡']
-    print(f"\n[INFO] 标签分布:")
+    print(f"\n[INFO] {('SMOTE增强后' if args.use_smote else '原始')}标签分布:")
     for label_idx in range(len(labels)):
         count = np.sum(y == label_idx)
         pct = count / len(y) * 100
         print(f"  {labels[label_idx]} ({label_idx}): {count:6d} ({pct:5.2f}%)")
     
-    # 5. 处理类别权重
-    if args.class_weights == 'balanced_subsample':
+    # 6. 处理类别权重
+    # 注意：使用SMOTE后可能不需要class_weight
+    if args.use_smote:
+        class_weight = None
+        print(f"\n[INFO] 使用SMOTE后，禁用class_weight（数据已平衡）")
+    elif args.class_weights == 'balanced_subsample':
         class_weight = 'balanced_subsample'
         print(f"\n[INFO] 使用自动平衡权重: balanced_subsample")
     else:
@@ -257,7 +297,7 @@ def main():
             print("[INFO] 使用默认: balanced_subsample")
             class_weight = 'balanced_subsample'
     
-    # 6. 构建 Random Forest 模型
+    # 7. 构建 Random Forest 模型
     print(f"\n[INFO] 构建 Random Forest 模型...")
     print(f"  - n_estimators: {args.n_estimators}")
     print(f"  - max_depth: None (不限制)")
@@ -273,7 +313,7 @@ def main():
         random_state=42
     )
     
-    # 7. 时间序列交叉验证（手动实现）
+    # 8. 时间序列交叉验证（手动实现）
     print(f"\n[INFO] 使用 TimeSeriesSplit (n_splits={args.cv_splits}) 交叉验证...")
     tscv = TimeSeriesSplit(n_splits=args.cv_splits)
     
@@ -343,7 +383,8 @@ def main():
     proba_df['pred_label'] = y_pred_cv  # 使用CV预测
     proba_df['is_correct'] = (y == y_pred_cv).astype(int)
     
-    if 'time' in df.columns:
+    # 只在未使用SMOTE时添加time列（SMOTE生成的合成样本没有对应的time）
+    if 'time' in df.columns and not args.use_smote:
         proba_df.insert(0, 'time', df['time'].values)
     
     # 12. 保存结果
@@ -367,6 +408,7 @@ def main():
         'data_file': data_file,
         'n_samples': int(len(X)),
         'n_features': int(len(feature_cols)),
+        'smote_applied': args.use_smote,
         'cv_strategy': f'TimeSeriesSplit(n_splits={args.cv_splits})',
         'model_config': {
             'n_estimators': args.n_estimators,

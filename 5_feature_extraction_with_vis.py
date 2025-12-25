@@ -475,14 +475,26 @@ def visualize_feature_boxplots(features_df: pd.DataFrame, out_dir: str):
 
 
 def main():
-    parser = argparse.ArgumentParser(description='特征提取')
+    parser = argparse.ArgumentParser(description='特征提取（支持增强数据）')
     
-    default_labeled = (r"D:\Desktop\python\rowing_ML\datasets"
-                       r"\Boat2x-20180420T085713_1633_rpc364_data_1CLX_1_B_"
-                       r"F92041BC-2503-4150-8196-2B45C0258ED8_clean_labeled.csv")
+    # 自动查找数据文件（优先使用增强数据）
+    import glob
     
-    parser.add_argument('--labeled_csv', type=str, default=default_labeled,
-                       help='标注后的CSV路径')
+    # 查找增强数据
+    augmented_files = glob.glob('datasets_augmented/*_augmented.csv')
+    labeled_files = glob.glob('datasets/*_labeled.csv')
+    
+    # 默认值：优先使用最新的增强数据
+    default_file = None
+    if augmented_files:
+        default_file = max(augmented_files, key=os.path.getmtime)
+        print(f"[INFO] 检测到增强数据: {default_file}")
+    elif labeled_files:
+        default_file = max(labeled_files, key=os.path.getmtime)
+        print(f"[INFO] 检测到标注数据: {default_file}") 
+    
+    parser.add_argument('--labeled_csv', type=str, default=default_file,
+                       help='标注后的CSV路径（支持增强数据）')
     parser.add_argument('--window_size', type=int, default=40,
                        help='窗口大小(样本数)')
     parser.add_argument('--stride', type=int, default=10,
@@ -494,12 +506,31 @@ def main():
     
     args = parser.parse_args()
     
+    if args.labeled_csv is None:
+        print("[ERROR] 未找到标注或增强数据文件！")
+        print("  请确保运行了步骤4 (生成标签) 或步骤5 (数据增强)")
+        return
+    
+    if not os.path.exists(args.labeled_csv):
+        raise FileNotFoundError(f"数据文件不存在: {args.labeled_csv}")
+    
+    # 检测是否为增强数据
+    is_augmented = '_augmented.csv' in args.labeled_csv
+    data_status = "增强数据" if is_augmented else "标注数据"
+    
+    print(f"\n{'='*60}")
+    print(f"特征提取 - 使用{data_status}")
+    print('='*60)
+    
     if not os.path.exists(args.labeled_csv):
         raise FileNotFoundError(f"标注文件不存在: {args.labeled_csv}")
     
-    print("[INFO] 加载标注数据...")
+    print(f"[INFO] 加载数据: {os.path.basename(args.labeled_csv)}")
     df = pd.read_csv(args.labeled_csv)
-    print(f"[INFO] 数据行数: {len(df)}")
+    print(f"[INFO] 数据行数: {len(df):,}")
+    
+    if is_augmented:
+        print(f"[INFO] ✨ 正在使用增强数据进行特征提取")
     
     # 提取特征
     features_df = extract_features_from_df(
@@ -512,9 +543,12 @@ def main():
     # 保存特征数据
     os.makedirs(args.out_dir, exist_ok=True)
     base_name = os.path.splitext(os.path.basename(args.labeled_csv))[0]
-    out_path = os.path.join(args.out_dir, f"{base_name}_features.csv")
+    # Remove _labeled or _augmented suffix, then add _features
+    base_name = base_name.replace('_labeled', '').replace('_augmented', '')
+    suffix = '_augmented_features' if is_augmented else '_labeled_features'
+    out_path = os.path.join(args.out_dir, f"{base_name}{suffix}.csv")
     features_df.to_csv(out_path, index=False)
-    print(f"[INFO] 特征数据已保存: {out_path}")
+    print(f"\n[INFO] 特征数据已保存: {out_path}")
     
     # 打印特征统计
     print(f"\n=== 特征统计 ===")

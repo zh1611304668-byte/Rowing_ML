@@ -199,6 +199,9 @@ def extract_features_from_df(
         if col in features_df.columns:
             features_df[f'{col}_momentum'] = features_df[col].diff().rolling(window=5, min_periods=1).sum().fillna(0)
     
+    # ⚠️ 添加 stroke_id 列以匹配训练特征（推理时设为0）
+    features_df['stroke_id'] = 0
+    
     print(f"[INFO] 特征总数: {len(features_df.columns) - 1}  (不含time)")
     
     return features_df

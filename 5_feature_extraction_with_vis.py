@@ -187,6 +187,12 @@ def extract_features_from_df(
     features_df['label'] = window_labels
     features_df['time'] = window_times
     
+    # Add stroke_id if available in input df
+    if 'stroke_id' in df.columns:
+        stroke_ids = df['stroke_id'].values
+        window_stroke_ids = [stroke_ids[i + window_size // 2] for i in range(0, len(acc_data) - window_size + 1, stride)]
+        features_df['stroke_id'] = window_stroke_ids
+    
     # ========== 新增：时间序列特征 ==========
     print("\n[INFO] 添加时间序列特征...")
     

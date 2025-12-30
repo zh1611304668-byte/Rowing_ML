@@ -425,10 +425,25 @@ def main():
     
     # 5. 准备特征矩阵 (排除time列)
     feature_cols = [col for col in features_df.columns if col != 'time']
+    X_temp = features_df[feature_cols].values
+    
+    print(f"\n[INFO] 提取的特征数: {X_temp.shape[1]}")
+    print(f"[INFO] 模型期望特征数: {model.n_features_in_}")
+    
+    # 如果模型需要87个特征但只提取了86个，添加stroke_id占位
+    if model.n_features_in_ == 87 and X_temp.shape[1] == 86:
+        print(f"[INFO] 添加stroke_id占位列以匹配模型特征数")
+        features_df['stroke_id'] = 0
+        feature_cols = [col for col in features_df.columns if col != 'time']
+    # 如果模型需要86个特征但提取了87个，移除stroke_id
+    elif model.n_features_in_ == 86 and X_temp.shape[1] == 87:
+        print(f"[INFO] 移除stroke_id列以匹配模型特征数")
+        if 'stroke_id' in features_df.columns:
+            feature_cols = [col for col in feature_cols if col != 'stroke_id']
+    
     X = features_df[feature_cols].values
     
-    print(f"\n[INFO] 特征矩阵形状: {X.shape}")
-    print(f"[INFO] 模型期望特征数: {model.n_features_in_}")
+    print(f"[INFO] 最终特征矩阵形状: {X.shape}")
     
     if X.shape[1] != model.n_features_in_:
         raise ValueError(f"特征数量不匹配! 提取了{X.shape[1]}个特征，但模型需要{model.n_features_in_}个")

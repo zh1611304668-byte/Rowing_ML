@@ -7,8 +7,17 @@
 """
 
 import os
+import sys
 import glob
 import pandas as pd
+
+# 导入元数据提取工具
+sys.path.append(os.path.join(os.path.dirname(__file__), 'utils'))
+try:
+    from metadata_extractor import extract_metadata_from_filename
+except ImportError:
+    print("[WARNING] 无法导入元数据提取工具，将不保留元数据")
+    extract_metadata_from_filename = None
 
 
 def find_labeled_files(search_dir='datasets'):
@@ -22,7 +31,7 @@ def find_labeled_files(search_dir='datasets'):
 
 def main():
     print("="*60)
-    print("数据合并脚本")
+    print("数据合并脚本（带元数据保留）")
     print("="*60)
     
     # 查找所有已标注文件
@@ -41,12 +50,31 @@ def main():
         print(f"  {i}. {os.path.basename(f)} ({size_mb:.1f} MB)")
     
     # 读取并合并
-    print("\n[INFO] 开始合并...")
+    print("\n[INFO] 开始合并（保留元数据）...")
     dfs = []
     max_stroke_id = 0  # 累计stroke_id偏移
     
     for i, f in enumerate(labeled_files, 1):
         df = pd.read_csv(f)
+        
+        # ========== 新增：从文件名提取元数据 ==========
+        if extract_metadata_from_filename is not None:
+            # labeled文件名本身就包含原始命名信息，直接提取
+            metadata = extract_metadata_from_filename(f)
+            
+            if metadata.get('session_id') is not None:
+                print(f"  [{i}/{len(labeled_files)}] {os.path.basename(f)[:60]}...")
+                print(f"      ✓ Session: {metadata.get('session_id')}, "
+                      f"Date: {metadata.get('date')}, "
+                      f"Level: {metadata.get('rower_level')}")
+                
+                # 添加元数据到DataFrame
+                for key, value in metadata.items():
+                    if key not in ['filename'] and value is not None:
+                        df[key] = value
+            else:
+                print(f"  [{i}/{len(labeled_files)}] {os.path.basename(f)[:60]}...")
+                print(f"      ⚠ 无法提取元数据")
         
         # 添加数据源标识
         df['source_file'] = os.path.basename(f)
@@ -57,7 +85,7 @@ def main():
             df['stroke_id'] = df['stroke_id'] + max_stroke_id
             max_stroke_id = df['stroke_id'].max() + 1  # 更新偏移量
         
-        print(f"  [{i}/{len(labeled_files)}] {os.path.basename(f)}: {len(df):,} 行")
+        print(f"      数据行数: {len(df):,}")
         dfs.append(df)
     
     # 合并

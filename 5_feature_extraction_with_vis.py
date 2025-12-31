@@ -14,6 +14,7 @@
 
 import argparse
 import os
+import sys
 from typing import Dict, List, Tuple, Optional
 
 import numpy as np
@@ -24,6 +25,15 @@ from scipy import stats as scipy_stats
 from scipy.fft import fft
 from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler
+
+# 导入元数据提取工具
+sys.path.append(os.path.join(os.path.dirname(__file__), 'utils'))
+try:
+    from metadata_extractor import extract_metadata_from_filename, add_metadata_to_dataframe
+except ImportError:
+    print("[WARNING] 无法导入元数据提取工具，将跳过元数据保留功能")
+    extract_metadata_from_filename = None
+    add_metadata_to_dataframe = None
 
 # 配置matplotlib支持中文
 plt.rcParams['font.sans-serif'] = ['SimHei', 'Microsoft YaHei', 'Arial Unicode MS']
@@ -138,10 +148,20 @@ def extract_custom_features(window: np.ndarray) -> Dict[str, float]:
 def extract_features_from_df(
     df: pd.DataFrame,
     window_size: int = 40,  # 400ms @ 100Hz
-    stride: int = 1,
+    stride: int = 40,  # 修改：默认0%重叠以减少伪泛化
     sample_rate: float = 100.0
 ) -> pd.DataFrame:
-    """从DataFrame中提取滑动窗口特征"""
+    """从DataFrame中提取滑动窗口特征
+    
+    参数:
+        df: 输入数据DataFrame，应包含 acc_dyn_x/y/z, label, time 列
+        window_size: 窗口大小（样本数）
+        stride: 窗口步长（样本数），默认40以避免重叠导致的伪泛化
+        sample_rate: 采样率（Hz）
+    
+    返回:
+        包含提取特征的DataFrame，保留元数据列用于交叉验证分组
+    """
     
     acc_cols = ['acc_dyn_x', 'acc_dyn_y', 'acc_dyn_z']
     acc_data = df[acc_cols].values
@@ -151,10 +171,13 @@ def extract_features_from_df(
     features_list = []
     window_labels = []
     window_times = []
+    window_indices = []  # 保存窗口中心索引，用于提取元数据
     
     print(f"[INFO] 开始特征提取...")
     print(f"[INFO] 窗口大小: {window_size} 样本 ({window_size/sample_rate*1000:.0f}ms)")
     print(f"[INFO] 步长: {stride} 样本 ({stride/sample_rate*1000:.0f}ms)")
+    overlap_pct = max(0, (1 - stride/window_size) * 100)
+    print(f"[INFO] 窗口重叠: {overlap_pct:.1f}%")
     
     total_windows = (len(acc_data) - window_size) // stride + 1
     
@@ -176,6 +199,7 @@ def extract_features_from_df(
         features_list.append(features)
         window_labels.append(window_label)
         window_times.append(window_time)
+        window_indices.append(center_idx)
         
         if (len(features_list) % 5000 == 0):
             print(f"[INFO] 已处理 {len(features_list)}/{total_windows} 窗口...")
@@ -187,13 +211,20 @@ def extract_features_from_df(
     features_df['label'] = window_labels
     features_df['time'] = window_times
     
+    # ========== 新增：保留元数据列（用于LOSO验证）==========
+    metadata_cols = ['session_id', 'date', 'rower_level', 'boat_type', 'device_id']
+    for col in metadata_cols:
+        if col in df.columns:
+            # 使用窗口中心点的元数据
+            features_df[col] = [df.iloc[idx][col] for idx in window_indices]
+            print(f"[INFO] 保留元数据列: {col}")
+    
     # Add stroke_id if available in input df
     if 'stroke_id' in df.columns:
-        stroke_ids = df['stroke_id'].values
-        window_stroke_ids = [stroke_ids[i + window_size // 2] for i in range(0, len(acc_data) - window_size + 1, stride)]
-        features_df['stroke_id'] = window_stroke_ids
+        features_df['stroke_id'] = [df.iloc[idx]['stroke_id'] for idx in window_indices]
+        print(f"[INFO] 保留 stroke_id 列")
     
-    # ========== 新增：时间序列特征 ==========
+    # ========== 时间序列特征 ==========
     print("\n[INFO] 添加时间序列特征...")
     
     # 关键特征列表（用于构建时间特征）
@@ -507,9 +538,9 @@ def main():
     parser.add_argument('--labeled_csv', type=str, default=default_file,
                        help='标注后的CSV路径（支持增强数据）')
     parser.add_argument('--window_size', type=int, default=40,
-                       help='窗口大小(样本数)')
-    parser.add_argument('--stride', type=int, default=20,
-                       help='滑动步长(样本数) [推荐20-40以降低窗口重叠伪泛化]')
+                       help='窗口大小(样本数), 默认40=400ms@100Hz')
+    parser.add_argument('--stride', type=int, default=40,
+                       help='滑动步长(样本数), 默认40=0%%重叠, 避免伪泛化[stride=20为50%%重叠]')
     parser.add_argument('--sample_rate', type=float, default=100.0,
                        help='采样率(Hz)')
     parser.add_argument('--out_dir', type=str, default='datasets',
@@ -542,6 +573,23 @@ def main():
     
     if is_augmented:
         print(f"[INFO] ✨ 正在使用增强数据进行特征提取")
+    
+    # ========== 新增：从文件路径提取并添加元数据 ==========
+    if extract_metadata_from_filename is not None:
+        print(f"\n[INFO] 提取文件元数据...")
+        metadata = extract_metadata_from_filename(args.labeled_csv)
+        print(f"  - Rower Level: {metadata.get('rower_level', 'N/A')}")
+        print(f"  - Boat Type: {metadata.get('boat_type', 'N/A')}")
+        print(f"  - Session ID: {metadata.get('session_id', 'N/A')}")
+        print(f"  - Date: {metadata.get('date', 'N/A')}")
+        
+        # 添加元数据到DataFrame（如果不存在）
+        for key, value in metadata.items():
+            if key not in ['filename'] and key not in df.columns and value is not None:
+                df[key] = value
+                print(f"  ✓ 已添加元数据列: {key}")
+    else:
+        print(f"\n[WARNING] 元数据提取工具未加载，跳过元数据保留")
     
     # 提取特征
     features_df = extract_features_from_df(

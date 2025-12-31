@@ -23,7 +23,7 @@ import seaborn as sns
 import pickle
 
 from sklearn.ensemble import RandomForestClassifier
-from sklearn.model_selection import StratifiedGroupKFold
+from sklearn.model_selection import StratifiedGroupKFold, LeaveOneGroupOut, GroupShuffleSplit
 from sklearn.metrics import classification_report, confusion_matrix
 from sklearn.inspection import permutation_importance
 
@@ -49,17 +49,37 @@ def simplify_labels(y):
 
 
 def create_stroke_groups(df):
+    """
+    创建分组标识，优先级：session_id > stroke_id > time-based
+    
+    用于 Leave-One-Session-Out (LOSO) 交叉验证
+    """
+    # 优先级1: 使用 session_id (最佳实践，用于LOSO)
+    if 'session_id' in df.columns:
+        groups = df['session_id'].values
+        n_groups = len(np.unique(groups))
+        print(f"[INFO] ✓ 使用 session_id 分组，共 {n_groups} 个独立训练会话")
+        print(f"[INFO]   → 将执行 Leave-One-Session-Out (LOSO) 验证")
+        return groups, 'session_id'
+    
+    # 优先级2: 回退到 stroke_id
     if 'stroke_id' in df.columns:
         groups = df['stroke_id'].values
-        print(f"[INFO] 使用 stroke_id 分组，共 {len(np.unique(groups))} 组")
-        return groups
+        n_groups = len(np.unique(groups))
+        print(f"[WARNING] session_id 未找到，使用 stroke_id 分组，共 {n_groups} 组")
+        print(f"[WARNING]   → 将执行 GroupShuffleSplit（警告：可能存在伪泛化）")
+        return groups, 'stroke_id'
+    
+    # 优先级3: 回退到时间分组（最差方案）
+    if 'time' in df.columns:
+        groups = (df['time'].values).astype(int)
     else:
-        if 'time' in df.columns:
-            groups = (df['time'].values).astype(int)
-        else:
-            groups = np.arange(len(df)) // 100
-        print(f"[WARNING] 未找到 stroke_id，使用伪组 {len(np.unique(groups))} 个")
-        return groups
+        groups = np.arange(len(df)) // 100
+    
+    n_groups = len(np.unique(groups))
+    print(f"[WARNING] 未找到 session_id 或 stroke_id，使用伪分组 {n_groups} 个")
+    print(f"[WARNING]   → 交叉验证结果可能不可靠！")
+    return groups, 'pseudo'
 
 
 def plot_confusion_matrix(y_true, y_pred, out_path, labels):
@@ -189,8 +209,9 @@ def main():
     print(f"[INFO] 样本数: {len(df)}")
     
     # 分离特征和标签
-    exclude_cols = ['label', 'time', 'stroke_id']
-    feature_cols = [c for c in df.columns if c not in exclude_cols]
+    metadata_cols = ['label', 'time', 'stroke_id', 'session_id', 'date', 
+                     'rower_level', 'boat_type', 'device_id']
+    feature_cols = [c for c in df.columns if c not in metadata_cols]
     X = df[feature_cols].values
     y_original = df['label'].values
     
@@ -206,7 +227,8 @@ def main():
     print("  恢复(3) → 恢复(3)")
     
     # 创建分组
-    groups = create_stroke_groups(df)
+    groups, group_type = create_stroke_groups(df)
+    n_unique_groups = len(np.unique(groups))
     
     # 标签分布
     print("\n[INFO] 新标签分布:")
@@ -215,17 +237,38 @@ def main():
         pct = count / len(y) * 100
         print(f"  {label} ({i}): {count:6d} ({pct:5.2f}%)")
     
-    # Group Split CV - 使用GroupShuffleSplit避免极端不平衡分割
-    from sklearn.model_selection import GroupShuffleSplit
-    
-    print(f"\n[INFO] 执行 GroupShuffleSplit ({args.cv_splits}次)...")
-    gss = GroupShuffleSplit(n_splits=args.cv_splits, test_size=0.2, random_state=42)
+    # ========== 选择交叉验证策略 ==========
+    # 根据分组类型选择最佳CV策略
+    if group_type == 'session_id' and n_unique_groups >= 3:
+        # 使用 Leave-One-Session-Out (最严格的泛化测试)
+        cv_strategy = LeaveOneGroupOut()
+        cv_name = "Leave-One-Session-Out (LOSO)"
+        n_splits = n_unique_groups
+        print(f"\n[INFO] 🎯 执行 {cv_name} 验证...")
+        print(f"[INFO]   每次留出1个完整训练会话作为测试集")
+        print(f"[INFO]   总共 {n_splits} 次交叉验证")
+    else:
+        # 回退到 GroupShuffleSplit
+        cv_strategy = GroupShuffleSplit(n_splits=args.cv_splits, test_size=0.2, random_state=42)
+        cv_name = f"GroupShuffleSplit ({args.cv_splits}次)"
+        n_splits = args.cv_splits
+        print(f"\n[INFO] 执行 {cv_name} 验证...")
+        if group_type != 'session_id':
+            print(f"[WARNING] ⚠️  未使用session_id，验证结果可能存在伪泛化！")
     
     y_pred_cv = np.full(len(y), -1, dtype=int)  # -1表示未预测
     fold_f1s = []
+    fold_results = []  # 存储每个fold的详细结果
     
-    for fold, (train_idx, test_idx) in enumerate(gss.split(X, y, groups), 1):
-        print(f"  Fold {fold}/{args.cv_splits}: Train={len(train_idx)}, Test={len(test_idx)}")
+    for fold, (train_idx, test_idx) in enumerate(cv_strategy.split(X, y, groups), 1):
+        # 获取当前fold测试的session信息
+        if group_type == 'session_id':
+            test_sessions = np.unique(groups[test_idx])
+            session_info = f", Test Session: {test_sessions[0]}"
+        else:
+            session_info = ""
+        
+        print(f"  Fold {fold}/{n_splits}: Train={len(train_idx)}, Test={len(test_idx)}{session_info}")
         
         rf = RandomForestClassifier(
             n_estimators=args.n_estimators,
@@ -243,6 +286,18 @@ def main():
         from sklearn.metrics import f1_score
         fold_f1 = f1_score(y[test_idx], pred, average='macro', zero_division=0)
         fold_f1s.append(fold_f1)
+        
+        # 存储详细结果
+        fold_result = {
+            'fold': fold,
+            'f1_score': fold_f1,
+            'n_train': len(train_idx),
+            'n_test': len(test_idx)
+        }
+        if group_type == 'session_id':
+            fold_result['test_session'] = str(test_sessions[0])
+        fold_results.append(fold_result)
+        
         print(f"    Fold {fold} Macro F1: {fold_f1:.4f}")
     
     # 对未被预测的样本用最后一个模型预测
@@ -250,11 +305,17 @@ def main():
     if np.any(not_predicted):
         y_pred_cv[not_predicted] = rf.predict(X[not_predicted])
     
-    print(f"\n  平均 Fold Macro F1: {np.mean(fold_f1s):.4f} ± {np.std(fold_f1s):.4f}")
+    print(f"\n  {'='*50}")
+    print(f"  {cv_name} 结果汇总")
+    print(f"  {'='*50}")
+    print(f"  平均 Macro F1: {np.mean(fold_f1s):.4f} ± {np.std(fold_f1s):.4f}")
+    print(f"  最佳 Fold F1:  {np.max(fold_f1s):.4f}")
+    print(f"  最差 Fold F1:  {np.min(fold_f1s):.4f}")
+    print(f"  {'='*50}")
     
     # 评估
     print("\n" + "="*60)
-    print("简化标签 Group CV 结果")
+    print(f"{cv_name} - 简化标签结果")
     print("="*60)
     
     report = classification_report(y, y_pred_cv, target_names=labels, 
@@ -313,8 +374,13 @@ def main():
     report_data = {
         'n_samples': len(df),
         'n_classes': 4,
+        'cv_strategy': cv_name,
+        'n_unique_groups': int(n_unique_groups),
+        'group_type': group_type,
         'macro_f1': float(macro_f1),
+        'macro_f1_std': float(np.std(fold_f1s)),
         'accuracy': float(accuracy),
+        'fold_results': fold_results,
         'per_class_f1': {label: float(report.get(label, {}).get('f1-score', 0)) 
                         for label in labels}
     }

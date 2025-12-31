@@ -2,12 +2,22 @@
 import argparse
 import json
 import os
+import sys
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+
+# 导入元数据提取工具
+sys.path.append(os.path.join(os.path.dirname(__file__), 'utils'))
+try:
+    from metadata_extractor import extract_metadata_from_filename
+    METADATA_AVAILABLE = True
+except ImportError:
+    print("[WARNING] 无法导入元数据提取工具，将不保留元数据")
+    METADATA_AVAILABLE = False
 
 
 TIME_COL_PRIORITY = [
@@ -322,6 +332,23 @@ def main():
     if not os.path.exists(args.csv_path):
         raise FileNotFoundError(f"csv_path not found: {args.csv_path}")
 
+    # ========== 新增：从文件名提取元数据 ==========
+    file_metadata = {}
+    if METADATA_AVAILABLE:
+        metadata = extract_metadata_from_filename(args.csv_path)
+        if metadata.get('session_id') is not None:
+            file_metadata = {
+                'session_id': metadata.get('session_id'),
+                'date': metadata.get('date'),
+                'rower_level': metadata.get('rower_level'),
+                'boat_type': metadata.get('boat_type'),
+                'device_id': metadata.get('device_id')
+            }
+            # 移除None值
+            file_metadata = {k: v for k, v in file_metadata.items() if v is not None}
+            print(f"[INFO] 从文件名提取元数据: {file_metadata}")
+    report["extracted_metadata"] = file_metadata
+
     df = pd.read_csv(args.csv_path)
 
     if args.session_id is not None:
@@ -511,8 +538,14 @@ def main():
     else:
         report["resampled"] = False
 
-    # Keep only cleaned columns in output
-    keep_cols = cols + ["segment_id"]
+    # ========== 新增：添加元数据到输出 ==========
+    if file_metadata:
+        for key, value in file_metadata.items():
+            df[key] = value
+            print(f"[INFO] 添加元数据列: {key} = {value}")
+    
+    # Keep only cleaned columns in output (包含元数据)
+    keep_cols = cols + ["segment_id"] + list(file_metadata.keys())
     df = df[keep_cols].copy()
     report["output_cols"] = keep_cols
 

@@ -425,12 +425,20 @@ def visualize_detected_events(time_s: np.ndarray,
 
 
 def main():
-    default_csv_path = ("D:/Desktop/python/rowing_ML/clean_report/"
-                        "Boat2x-20180420T085713_1633_rpc364_data_1CLX_1_B_"
-                        "F92041BC-2503-4150-8196-2B45C0258ED8_clean.csv")
+    import glob
+    
+    # 自动查找clean_report目录下的清洗数据
+    clean_files = glob.glob('clean_report/*_clean.csv')
+    default_csv_path = None
+    if clean_files:
+        default_csv_path = max(clean_files, key=os.path.getmtime)
+        print(f"[INFO] 自动检测到数据文件: {default_csv_path}")
 
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--csv_path", type=str, default=default_csv_path)
+    parser = argparse.ArgumentParser(description='划桨事件检测')
+    parser.add_argument("--csv_path", type=str, default=default_csv_path,
+                       help='清洗后的CSV路径（留空自动查找最新）')
+    parser.add_argument("--all", action="store_true",
+                       help='处理clean_report下所有*_clean.csv文件')
     parser.add_argument("--out_path", type=str, default=None)
     parser.add_argument("--time_col", type=str, default=None)
     parser.add_argument("--time_unit", type=str, default="s", choices=["s", "ms"])

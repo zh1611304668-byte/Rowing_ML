@@ -1,14 +1,12 @@
-#!/usr/bin/env python3
 """
 自动标注生成器
 根据划桨事件时间戳为IMU数据生成训练标签
 
-标签定义:
+标签定义（4类）:
 - 0: 背景/静止
 - 1: 划桨准备期 (事件前200ms)
 - 2: 划桨核心期 (事件前后±100ms)
 - 3: 划桨恢复期 (核心后自适应)
-- 4: 划桨过渡期 (恢复后固定400ms)
 """
 
 import argparse
@@ -61,13 +59,14 @@ def generate_labels(
     transition_min_duration_ms: float = 150.0  # 新增：过渡期最小持续时间
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
-    生成多类别标签
-    新逻辑：将划桨后阶段拆分为：
-    - 恢复期(3)：核心期结束后，加速度由正值很大变为上下波动的高振幅阶段（自适应检测）
-    - 过渡期(4)：振荡平稳后，持续固定的过渡时间（固定400ms）
+    生成多类别标签（4类）
+    - 背景(0): 非划桨时段
+    - 准备(1): 事件前
+    - 核心(2): 事件前后
+    - 恢复(3): 核心后，振荡平稳
     
     Returns:
-        labels: 0=背景, 1=准备, 2=核心, 3=恢复, 4=过渡
+        labels: 0=背景, 1=准备, 2=核心, 3=恢复
         stroke_ids: 每个样本所属的划桨编号 (-1表示背景)
     """
     n = len(time_s)
@@ -200,32 +199,31 @@ def generate_labels(
             transition_end_idx = recover_end_idx + transition_samples
             transition_end_idx = min(transition_end_idx, search_stop)
 
-        # 标注各阶段
+        # 标注各阶段（4类）
         labels[prepare_start_idx:core_start_idx] = 1  # 准备期
         labels[core_start_idx:core_end_idx] = 2       # 核心期
-        labels[core_end_idx:recover_end_idx] = 3      # 恢复期（自适应 - 蓝色）
-        labels[recover_end_idx:transition_end_idx] = 4 # 过渡期（固定500ms - 紫色）
+        labels[core_end_idx:recover_end_idx] = 3      # 恢复期
+        # 恢复期后直接是背景(0)，无需标注
 
-        # 记录所属划桨编号（包括过渡期）
-        stroke_ids[prepare_start_idx:transition_end_idx] = stroke_id
+        # 记录所属划桨编号
+        stroke_ids[prepare_start_idx:recover_end_idx] = stroke_id
     
     return labels, stroke_ids
 
 
 def visualize_labels(df: pd.DataFrame, acc_cols: Tuple[str, str, str], 
-                     out_dir: str, num_samples: int = 10):
+                     out_dir: str, num_samples: int = 10, prefix: str = ''):
     """增强版可视化标注结果"""
     os.makedirs(out_dir, exist_ok=True)
     
-    # 颜色映射 - 使用更鲜明的颜色（含背景填充）
+    # 颜色映射 - 4类标签
     label_colors = {
-        0: '#BBDEFB',  # 浅蓝 - 背景
+        0: '#CE93D8',  # 紫色 - 背景
         1: '#FFF59D',  # 黄色 - 准备
         2: '#FF5252',  # 红色 - 核心
         3: '#90CAF9',  # 蓝色 - 恢复
-        4: '#CE93D8'   # 紫色 - 过渡
     }
-    label_names = {0: '背景', 1: '准备', 2: '核心', 3: '恢复', 4: '过渡'}
+    label_names = {0: '背景', 1: '准备', 2: '核心', 3: '恢复'}
     
     # 随机采样几段数据可视化
     stroke_events = df[df['label'] == 2]['time'].values
@@ -258,7 +256,7 @@ def visualize_labels(df: pd.DataFrame, acc_cols: Tuple[str, str, str],
         # ===================
         
         # 先绘制标签背景区域
-        for label_value in [1, 2, 3, 4]:
+        for label_value in [1, 2, 3]:
             label_mask = df_sample['label'].values == label_value
             if not np.any(label_mask):
                 continue
@@ -298,7 +296,7 @@ def visualize_labels(df: pd.DataFrame, acc_cols: Tuple[str, str, str],
         axes[0].grid(True, alpha=0.3, linestyle=':', linewidth=0.8)
         axes[0].set_title(
             f'样本 {i}/{num_samples}: 划桨事件 @ {event_time:.2f}s  ' + 
-            f'[黄=准备, 红=核心, 蓝=恢复, 紫=过渡]', 
+            f'[黄=准备, 红=核心, 蓝=恢复, 紫=背景]', 
             fontsize=15, fontweight='bold', pad=15
         )
         
@@ -313,7 +311,7 @@ def visualize_labels(df: pd.DataFrame, acc_cols: Tuple[str, str, str],
                     linewidth=2.5, label='加速度幅值', zorder=2)
         
         # 为不同标签区域填充颜色
-        for label_value in [0, 1, 2, 3, 4]:
+        for label_value in [0, 1, 2, 3]:
             label_mask = df_sample['label'] == label_value
             if np.any(label_mask):
                 axes[1].fill_between(
@@ -335,7 +333,10 @@ def visualize_labels(df: pd.DataFrame, acc_cols: Tuple[str, str, str],
         axes[1].grid(True, alpha=0.3, linestyle=':', linewidth=0.8)
         
         plt.tight_layout()
-        out_path = os.path.join(out_dir, f'label_vis_sample_{i:02d}.png')
+        if prefix:
+            out_path = os.path.join(out_dir, f'{prefix}_label_vis_{i:02d}.png')
+        else:
+            out_path = os.path.join(out_dir, f'label_vis_sample_{i:02d}.png')
         plt.savefig(out_path, dpi=150, bbox_inches='tight')
         plt.close()
         
@@ -359,14 +360,12 @@ def generate_statistics(df: pd.DataFrame, out_dir: str):
             '准备 (1)': int(label_counts.get(1, 0)),
             '核心 (2)': int(label_counts.get(2, 0)),
             '恢复 (3)': int(label_counts.get(3, 0)),
-            '过渡 (4)': int(label_counts.get(4, 0)),
         },
         'label_percentage': {
             '背景 (0)': f"{label_counts.get(0, 0) / total * 100:.2f}%",
             '准备 (1)': f"{label_counts.get(1, 0) / total * 100:.2f}%",
             '核心 (2)': f"{label_counts.get(2, 0) / total * 100:.2f}%",
             '恢复 (3)': f"{label_counts.get(3, 0) / total * 100:.2f}%",
-            '过渡 (4)': f"{label_counts.get(4, 0) / total * 100:.2f}%",
         },
         'unique_strokes': int(df['stroke_id'].max() + 1) if len(df) > 0 else 0,
     }
@@ -379,9 +378,9 @@ def generate_statistics(df: pd.DataFrame, out_dir: str):
     # 绘制标签分布图
     fig, axes = plt.subplots(1, 2, figsize=(14, 5))
     
-    labels_list = ['背景', '准备', '核心', '恢复', '过渡']
-    sizes = [label_counts.get(i, 0) for i in range(5)]
-    colors = ['lightgray', 'yellow', 'red', 'skyblue', 'purple']
+    labels_list = ['背景', '准备', '核心', '恢复']
+    sizes = [label_counts.get(i, 0) for i in range(4)]
+    colors = ['lightgray', 'yellow', 'red', 'skyblue']
     
     axes[0].pie(sizes, labels=labels_list, colors=colors, autopct='%1.1f%%', startangle=90)
     axes[0].set_title('标签分布 (百分比)', fontsize=14)
@@ -405,16 +404,37 @@ def generate_statistics(df: pd.DataFrame, out_dir: str):
 
 
 def main():
-    parser = argparse.ArgumentParser(description='生成训练标签')
+    parser = argparse.ArgumentParser(description='生成训练标签（4类）')
     
-    default_csv = (r"D:\Desktop\python\rowing_ML\clean_report"
-                   r"\Boat2x-20180420T085713_1633_rpc364_data_1CLX_1_B_"
-                   r"F92041BC-2503-4150-8196-2B45C0258ED8_clean.csv")
-    default_events = (r"D:\Desktop\python\rowing_ML"
-                      r"\Boat2x-20180420T085713_1633_rpc364_data_1CLX_1_B_"
-                      r"F92041BC-2503-4150-8196-2B45C0258ED8_clean_events.txt")
+    # 自动查找最新的清洗数据和事件文件
+    import glob
     
-    parser.add_argument('--csv_path', type=str, default=default_csv)
+    # 查找clean_report目录下最新的_clean.csv
+    clean_files = glob.glob('clean_report/*_clean.csv')
+    default_csv = None
+    default_events = None
+    
+    if clean_files:
+        default_csv = max(clean_files, key=os.path.getmtime)
+        # 构造对应的事件文件路径（同级目录或项目根目录）
+        base_name = os.path.splitext(os.path.basename(default_csv))[0]
+        possible_event_paths = [
+            f'{base_name}_events.txt',  # 项目根目录
+            f'clean_report/{base_name}_events.txt',  # clean_report目录
+            os.path.join(os.path.dirname(default_csv), f'{base_name}_events.txt'),
+        ]
+        for path in possible_event_paths:
+            if os.path.exists(path):
+                default_events = path
+                break
+        
+        if default_csv:
+            print(f"[INFO] 自动检测到数据文件: {default_csv}")
+        if default_events:
+            print(f"[INFO] 自动检测到事件文件: {default_events}")
+    
+    parser.add_argument('--csv_path', type=str, default=default_csv,
+                       help='清洗后的CSV文件路径（留空自动查找）')
     parser.add_argument('--event_path', type=str, default=default_events)
     parser.add_argument('--event_unit', type=str, default='auto', choices=['auto', 's', 'ms'])
     parser.add_argument('--prepare_window_ms', type=float, default=300.0,
@@ -445,10 +465,31 @@ def main():
     
     args = parser.parse_args()
     
+    # ⚠️ 关键：当用户手动指定csv_path（与默认值不同）时，必须重新匹配事件文件
+    user_specified_csv = args.csv_path and args.csv_path != default_csv
+    need_rematch_events = user_specified_csv or args.event_path is None or not os.path.exists(args.event_path)
+    
+    if args.csv_path and need_rematch_events:
+        base_name = os.path.splitext(os.path.basename(args.csv_path))[0]
+        possible_event_paths = [
+            f'{base_name}_events.txt',  # 项目根目录
+            f'clean_report/{base_name}_events.txt',
+            os.path.join(os.path.dirname(args.csv_path), f'{base_name}_events.txt'),
+        ]
+        args.event_path = None  # 重置
+        for path in possible_event_paths:
+            if os.path.exists(path):
+                args.event_path = path
+                print(f"[INFO] 自动匹配事件文件: {path}")
+                break
+    
     if not os.path.exists(args.csv_path):
         raise FileNotFoundError(f"CSV文件不存在: {args.csv_path}")
-    if not os.path.exists(args.event_path):
+    if not args.event_path or not os.path.exists(args.event_path):
         raise FileNotFoundError(f"事件文件不存在: {args.event_path}")
+    
+    print(f"[INFO] 使用数据文件: {args.csv_path}")
+    print(f"[INFO] 使用事件文件: {args.event_path}")
     
     print("[INFO] 加载数据...")
     df = pd.read_csv(args.csv_path)
@@ -502,7 +543,9 @@ def main():
     if args.visualize:
         print("[INFO] 生成可视化...")
         acc_cols = ('acc_dyn_x', 'acc_dyn_y', 'acc_dyn_z')
-        visualize_labels(df, acc_cols, args.out_dir, num_samples=args.num_vis_samples)
+        # 使用数据文件名作为可视化前缀
+        vis_prefix = base_name[:30]  # 截取前30个字符避免过长
+        visualize_labels(df, acc_cols, args.out_dir, num_samples=args.num_vis_samples, prefix=vis_prefix)
     
     print("\n[完成] 标注生成完毕!")
 

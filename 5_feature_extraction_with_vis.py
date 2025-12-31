@@ -257,15 +257,26 @@ def visualize_pca_3d(features_df: pd.DataFrame, out_dir: str) -> Optional[Tuple]
           f"PC3={pca.explained_variance_ratio_[2]*100:.1f}%, "
           f"总计={sum(pca.explained_variance_ratio_)*100:.1f}%")
     
-    # 标签配置 (与 generate_labels.py 保持一致)
-    label_names = {0: '背景', 1: '准备', 2: '核心', 3: '恢复', 4: '过渡'}
-    colors = {
-        0: '#BBDEFB',  # 浅蓝 - 背景
-        1: '#FFF59D',  # 黄色 - 准备
-        2: '#FF5252',  # 红色 - 核心
-        3: '#90CAF9',  # 蓝色 - 恢复
-        4: '#CE93D8'   # 紫色 - 过渡
-    }
+    # 动态适配标签配置 (支持4类和5类)
+    unique_labels = sorted(features_df['label'].unique())
+    if max(unique_labels) <= 3:  # 简化4类标签
+        label_names = {0: '背景/过渡', 1: '准备', 2: '核心', 3: '恢复'}
+        colors = {
+            0: '#BBDEFB',  # 浅蓝 - 背景/过渡
+            1: '#FFF59D',  # 黄色 - 准备
+            2: '#FF5252',  # 红色 - 核心
+            3: '#90CAF9',  # 蓝色 - 恢复
+        }
+        print("  使用简化4类标签配置")
+    else:  # 原5类标签
+        label_names = {0: '背景', 1: '准备', 2: '核心', 3: '恢复', 4: '过渡'}
+        colors = {
+            0: '#BBDEFB',  # 浅蓝 - 背景
+            1: '#FFF59D',  # 黄色 - 准备
+            2: '#FF5252',  # 红色 - 核心
+            3: '#90CAF9',  # 蓝色 - 恢复
+            4: '#CE93D8'   # 紫色 - 过渡
+        }
     
     # 创建多角度视图
     fig = plt.figure(figsize=(20, 15))
@@ -497,8 +508,8 @@ def main():
                        help='标注后的CSV路径（支持增强数据）')
     parser.add_argument('--window_size', type=int, default=40,
                        help='窗口大小(样本数)')
-    parser.add_argument('--stride', type=int, default=10,
-                       help='滑动步长(样本数)')
+    parser.add_argument('--stride', type=int, default=20,
+                       help='滑动步长(样本数) [推荐20-40以降低窗口重叠伪泛化]')
     parser.add_argument('--sample_rate', type=float, default=100.0,
                        help='采样率(Hz)')
     parser.add_argument('--out_dir', type=str, default='datasets',

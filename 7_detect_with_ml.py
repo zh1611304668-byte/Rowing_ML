@@ -397,10 +397,23 @@ def main():
     # 2. 加载模型
     print(f"\n[INFO] 加载训练好的模型: {args.model}")
     with open(args.model, 'rb') as f:
-        model = pickle.load(f)
+        model_data = pickle.load(f)
+    
+    # 支持新格式（dict）和旧格式（直接模型）
+    if isinstance(model_data, dict):
+        model = model_data['model']
+        n_classes = len(model_data.get('labels', ['背景/过渡', '准备', '核心', '恢复']))
+        label_names = {i: name for i, name in enumerate(model_data.get('labels', ['背景/过渡', '准备', '核心', '恢复']))}
+        print(f"[INFO] 简化模型: {n_classes}类标签")
+    else:
+        model = model_data
+        n_classes = 5
+        label_names = {0: '背景', 1: '准备', 2: '核心', 3: '恢复', 4: '过渡'}
+    
     print(f"[INFO] 模型加载成功!")
     print(f"  - 模型类型: {type(model).__name__}")
     print(f"  - 特征数量: {model.n_features_in_}")
+    print(f"  - 标签数量: {n_classes}")
     
     # 3. 加载新数据
     print(f"\n[INFO] 加载新数据: {args.data}")
@@ -473,7 +486,7 @@ def main():
     print("预测结果统计")
     print('='*60)
     
-    label_names = {0: '背景', 1: '准备', 2: '核心', 3: '恢复', 4: '过渡'}
+    # label_names 已在模型加载时设置
     
     print("\n标签分布:")
     label_counts = pd.Series(predictions).value_counts().sort_index()
